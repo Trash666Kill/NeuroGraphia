@@ -4,6 +4,8 @@ sudo apt install -y \
     libgl1 libglib2.0-0 \
     libsm6 libxext6 libxrender1 \
     libjpeg-dev libpng-dev libtiff-dev
+apt install libimage-exiftool-perl -y
+
 
 mkdir NeuroGraphia && cd NeuroGraphia
 python3 -m venv .venv
@@ -25,7 +27,10 @@ pip install transformers
 
 
 # Para processar um único manuscrito com o modelo de alta precisão
-python ocr_manuscript.py imagem.jpg --model large --device gpu
+python3 neurog.py sample.jpeg --model large --device gpu
 
 # Para processar uma pasta inteira otimizando para CPU
-python ocr_manuscript.py --folder ./meus_manuscritos --quantize --batch 4
+python3 neurog.py --folder ./meus_manuscritos --quantize --batch 4
+
+
+python3 neurog.py sample.jpeg --quantize --batch 4
