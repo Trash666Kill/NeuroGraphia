@@ -21,3 +21,11 @@ pip install "kraken>=4.3"
 
 # TrOCR
 pip install transformers
+
+
+
+# Para processar um único manuscrito com o modelo de alta precisão
+python ocr_manuscript.py imagem.jpg --model large --device gpu
+
+# Para processar uma pasta inteira otimizando para CPU
+python ocr_manuscript.py --folder ./meus_manuscritos --quantize --batch 4
