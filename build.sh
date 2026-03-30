@@ -5,8 +5,9 @@ sudo apt install -y \
     libsm6 libxext6 libxrender1 \
     libjpeg-dev libpng-dev libtiff-dev
 
-python3 -m venv ~/ocr-env
-source ~/ocr-env/bin/activate
+mkdir NeuroGraphia && cd NeuroGraphia
+python3 -m venv .venv
+source .venv/bin/activate
 pip install --upgrade pip
 
 # Visão computacional e imagem
