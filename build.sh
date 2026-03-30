@@ -33,4 +33,4 @@ python3 neurog.py sample.jpeg --model large --device gpu
 python3 neurog.py --folder ./meus_manuscritos --quantize --batch 4
 
 
-python3 neurog.py sample.jpeg --quantize --batch 4
+python3 neurog.py sample.jpeg --quantize --batch 4 --debug

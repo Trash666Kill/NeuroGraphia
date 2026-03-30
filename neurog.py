@@ -23,8 +23,7 @@ from PIL import Image
 import torch
 import torch.quantization
 from transformers import TrOCRProcessor, VisionEncoderDecoderModel
-from kraken import binarization
-from kraken.lib import segmentation as kraken_seg
+# kraken binarization replaced by OpenCV Otsu — no kraken imports needed here
 
 
 TOOL_NAME    = "NeuroGraphia"
@@ -65,7 +64,9 @@ def deskew(img_cv):
     def count_horizontal_lines(img):
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         edges = cv2.Canny(gray, 50, 150, apertureSize=3)
-        lines = cv2.HoughLines(edges, 1, np.pi / 180, threshold=200)
+        # Scale threshold with image width so it works on small images too
+        thresh = max(50, img.shape[1] // 6)
+        lines = cv2.HoughLines(edges, 1, np.pi / 180, threshold=thresh)
         count = 0
         if lines is not None:
             for line in lines:
@@ -86,7 +87,8 @@ def deskew(img_cv):
     # Step B: fine adjustment via Hough
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     edges = cv2.Canny(gray, 50, 150, apertureSize=3)
-    lines = cv2.HoughLines(edges, 1, np.pi / 180, threshold=200)
+    thresh = max(50, img.shape[1] // 6)
+    lines = cv2.HoughLines(edges, 1, np.pi / 180, threshold=thresh)
     angles = []
     if lines is not None:
         for line in lines:
@@ -155,35 +157,82 @@ def process_image(path, processor, model, device, batch_size):
     img_cv  = deskew(img_cv)
     img_pil = Image.fromarray(cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGB))
 
-    img_bin    = binarization.nlbin(img_pil)
-    # Kraken 4.x: segment() is in kraken.lib.segmentation and returns
-    # a dict with key "lines", each entry having a "cuts" bounding box
-    seg_result = kraken_seg.segment(img_bin)
-    lines      = seg_result.get("lines", [])
-    print(f"[{TOOL_NAME}]    {len(lines)} lines detected")
+    # ── Binarization (adaptive threshold) ────────────────────────────
+    # Adaptive threshold handles uneven lighting better than global Otsu
+    # (important for photos with shadows, curved pages, patterned backgrounds).
+    gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
+    gray = cv2.GaussianBlur(gray, (3, 3), 0)
+    bin_cv = cv2.adaptiveThreshold(
+        gray, 255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY_INV,
+        blockSize=31, C=10
+    )
 
-    # Build list of valid line crops
-    crops = []
-    for line in lines:
-        # Kraken 4.x bbox is stored in line["cuts"] as a flat list of
-        # polygon points; derive the bounding rect from min/max coords
-        pts = line.get("cuts") or line.get("boundary") or []
-        if not pts:
-            # fallback: try legacy "bbox" key
-            bbox = line.get("bbox")
-            if bbox is None:
-                continue
-            x0, y0, x1, y1 = bbox
+    # ── Mask out borders (patterned/dark backgrounds) ─────────────────
+    # Trim 5% from each edge to avoid background noise contaminating the
+    # projection profile (e.g. tablecloth, spiral binding).
+    h_img, w_img = bin_cv.shape
+    mx, my = int(w_img * 0.05), int(h_img * 0.03)
+    mask = np.zeros_like(bin_cv)
+    mask[my:h_img - my, mx:w_img - mx] = 255
+    bin_cv = cv2.bitwise_and(bin_cv, mask)
+
+    # ── Line segmentation via horizontal projection profile ───────────
+    # Wide kernel (40px) closes gaps between characters within a line;
+    # height=2 avoids merging adjacent lines together.
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (40, 2))
+    closed = cv2.morphologyEx(bin_cv, cv2.MORPH_CLOSE, kernel)
+
+    # Sum pixel values per row (each white pixel = 255)
+    proj = closed.sum(axis=1).astype(np.int64)
+    h, w = closed.shape
+    # A row counts as "text" if at least 0.5% of its width has ink
+    min_row_fill = w * 255 * 0.005
+
+    in_line, y_start = False, 0
+    line_bboxes = []
+    for y, val in enumerate(proj):
+        if not in_line and val >= min_row_fill:
+            in_line, y_start = True, y
+        elif in_line and val < min_row_fill:
+            in_line = False
+            line_bboxes.append((y_start, y))
+    if in_line:
+        line_bboxes.append((y_start, h))
+
+    # Merge segments whose gap is < 8px (broken ascenders/descenders)
+    merged = []
+    for (y0, y1) in line_bboxes:
+        if merged and (y0 - merged[-1][1]) < 8:
+            merged[-1] = (merged[-1][0], y1)
         else:
-            xs = [p[0] for p in pts]
-            ys = [p[1] for p in pts]
-            x0, y0, x1, y1 = min(xs), min(ys), max(xs), max(ys)
+            merged.append((y0, y1))
+    # Drop very thin segments (< 10px) — they are noise, not text lines
+    line_bboxes = [(y0, y1) for y0, y1 in merged if (y1 - y0) >= 10]
 
+    print(f"[{TOOL_NAME}]    {len(line_bboxes)} lines detected")
+
+    # ── Debug: save annotated binarization image if --debug passed ────
+    if getattr(process_image, "_debug", False):
+        dbg = cv2.cvtColor(bin_cv, cv2.COLOR_GRAY2BGR)
+        for (dy0, dy1) in line_bboxes:
+            cv2.rectangle(dbg, (0, dy0), (w - 1, dy1), (0, 255, 0), 2)
+        dbg_path = Path(path).stem + "_debug.png"
+        cv2.imwrite(str(dbg_path), dbg)
+        print(f"[{TOOL_NAME}]    debug image: {dbg_path}")
+
+    # ── Build crops from original colour image ────────────────────────
+    PAD = 8
+    crops = []
+    for (y0, y1) in line_bboxes:
         crop = img_pil.crop((
-            max(0, x0 - 6), max(0, y0 - 6),
-            min(img_pil.width, x1 + 6), min(img_pil.height, y1 + 6)
+            0,
+            max(0, y0 - PAD),
+            img_pil.width,
+            min(img_pil.height, y1 + PAD),
         )).convert("RGB")
-        if crop.width >= 50:
+        if crop.width >= 100 and crop.height >= 12:
             crops.append(crop)
 
     if not crops:
@@ -240,6 +289,12 @@ def main():
         version=f"{TOOL_NAME} {TOOL_VERSION}",
     )
 
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Save <name>_debug.png with binarization + detected line boxes",
+    )
+
     args = parser.parse_args()
 
     if args.model_info:
@@ -266,6 +321,7 @@ def main():
         device = "cpu"
 
     processor, model = load_model(args.model, device, args.quantize)
+    process_image._debug = args.debug
 
     output = Path(args.output)
     with output.open("w", encoding="utf-8") as f:
