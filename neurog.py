@@ -1,16 +1,16 @@
 """
-ocr_manuscript.py
-─────────────────
-Extracts text from handwritten manuscripts and saves to TXT.
+NeuroGraphia
+────────────
+Handwritten manuscript OCR tool.
 Pipeline: deskew (OpenCV) -> binarization (Kraken) -> segmentation (Kraken) -> OCR (TrOCR)
 
 Installation:
-  pip install opencv-python-headless numpy Pillow kraken transformers torch torchvision
+  pip install opencv-python-headless numpy Pillow "kraken>=4.3" transformers torch torchvision
 
 Usage:
-  python ocr_manuscript.py image1.jpg
-  python ocr_manuscript.py --folder ./manuscripts --model large --device gpu --batch 8 --quantize
-  python ocr_manuscript.py --model-info
+  python neurographia.py image1.jpg
+  python neurographia.py --folder ./manuscripts --model large --device gpu --batch 8 --quantize
+  python neurographia.py --model-info
 """
 
 import sys
@@ -23,8 +23,12 @@ from PIL import Image
 import torch
 import torch.quantization
 from transformers import TrOCRProcessor, VisionEncoderDecoderModel
-from kraken import binarization, pageseg
+from kraken import binarization
+from kraken.lib import segmentation as kraken_seg
 
+
+TOOL_NAME    = "NeuroGraphia"
+TOOL_VERSION = "1.0.0"
 
 # ── Available models ──────────────────────────────────────────────────
 
@@ -104,21 +108,21 @@ def deskew(img_cv):
 
 def load_model(model_name, device, quantize):
     repo = MODELS[model_name]
-    print(f"Loading model: {repo}")
+    print(f"[{TOOL_NAME}] Loading model: {repo}")
     processor = TrOCRProcessor.from_pretrained(repo)
     model     = VisionEncoderDecoderModel.from_pretrained(repo)
 
     if quantize:
         if device == "cuda":
-            print("  [warning] INT8 quantization is not supported on GPU -- skipped.")
+            print(f"[{TOOL_NAME}] [warning] INT8 quantization is not supported on GPU -- skipped.")
         else:
-            print("  Applying INT8 quantization...")
+            print(f"[{TOOL_NAME}] Applying INT8 quantization...")
             model = torch.quantization.quantize_dynamic(
                 model, {torch.nn.Linear}, dtype=torch.qint8
             )
 
     model.to(device).eval()
-    print(f"  Ready  |  device: {device}\n")
+    print(f"[{TOOL_NAME}] Model ready  |  device: {device}\n")
     return processor, model
 
 
@@ -141,24 +145,40 @@ def recognize_lines(crops, processor, model, device, batch_size):
 # ── Process a single image ────────────────────────────────────────────
 
 def process_image(path, processor, model, device, batch_size):
-    print(f"-> {Path(path).name}")
+    print(f"[{TOOL_NAME}] -> {Path(path).name}")
 
     img_cv = cv2.imread(str(path))
     if img_cv is None:
-        print("  [ERROR] Could not open image.")
+        print(f"[{TOOL_NAME}] [ERROR] Could not open image.")
         return ""
 
     img_cv  = deskew(img_cv)
     img_pil = Image.fromarray(cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGB))
 
-    img_bin     = binarization.nlbin(img_pil)
-    segmentation = pageseg.segment(img_bin)
-    print(f"  {len(segmentation.lines)} lines detected")
+    img_bin    = binarization.nlbin(img_pil)
+    # Kraken 4.x: segment() is in kraken.lib.segmentation and returns
+    # a dict with key "lines", each entry having a "cuts" bounding box
+    seg_result = kraken_seg.segment(img_bin)
+    lines      = seg_result.get("lines", [])
+    print(f"[{TOOL_NAME}]    {len(lines)} lines detected")
 
     # Build list of valid line crops
     crops = []
-    for line in segmentation.lines:
-        x0, y0, x1, y1 = line.bbox
+    for line in lines:
+        # Kraken 4.x bbox is stored in line["cuts"] as a flat list of
+        # polygon points; derive the bounding rect from min/max coords
+        pts = line.get("cuts") or line.get("boundary") or []
+        if not pts:
+            # fallback: try legacy "bbox" key
+            bbox = line.get("bbox")
+            if bbox is None:
+                continue
+            x0, y0, x1, y1 = bbox
+        else:
+            xs = [p[0] for p in pts]
+            ys = [p[1] for p in pts]
+            x0, y0, x1, y1 = min(xs), min(ys), max(xs), max(ys)
+
         crop = img_pil.crop((
             max(0, x0 - 6), max(0, y0 - 6),
             min(img_pil.width, x1 + 6), min(img_pil.height, y1 + 6)
@@ -177,7 +197,8 @@ def process_image(path, processor, model, device, batch_size):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Handwritten manuscript OCR -> TXT",
+        prog=TOOL_NAME,
+        description=f"{TOOL_NAME} {TOOL_VERSION} -- Handwritten manuscript OCR",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("images", nargs="*", help="Image files to process")
@@ -213,6 +234,11 @@ def main():
         action="store_true",
         help="Show details about available models and exit",
     )
+    parser.add_argument(
+        "--version", "-v",
+        action="version",
+        version=f"{TOOL_NAME} {TOOL_VERSION}",
+    )
 
     args = parser.parse_args()
 
@@ -232,7 +258,7 @@ def main():
     # Resolve device
     if args.device == "gpu":
         if not torch.cuda.is_available():
-            print("[warning] GPU not found -- falling back to CPU.")
+            print(f"[{TOOL_NAME}] [warning] GPU not found -- falling back to CPU.")
             device = "cpu"
         else:
             device = "cuda"
@@ -250,7 +276,7 @@ def main():
             f.write(text)
             f.write("\n\n")
 
-    print(f"\nSaved to: {output}")
+    print(f"\n[{TOOL_NAME}] Saved to: {output}")
 
 
 if __name__ == "__main__":
