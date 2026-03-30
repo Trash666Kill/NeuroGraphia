@@ -17,7 +17,7 @@ pip install opencv-python-headless numpy Pillow
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 
 # Kraken (binarização + segmentação)
-pip install kraken
+pip install "kraken>=4.3"
 
 # TrOCR
 pip install transformers
