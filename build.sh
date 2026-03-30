@@ -13,11 +13,11 @@ pip install --upgrade pip
 # Visão computacional e imagem
 pip install opencv-python-headless numpy Pillow
 
-# Kraken (binarização + segmentação)
-pip install kraken
-
 # PyTorch — versão CPU (menor download, ~200 MB vs ~2 GB da versão GPU)
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+
+# Kraken (binarização + segmentação)
+pip install kraken
 
 # TrOCR
 pip install transformers
